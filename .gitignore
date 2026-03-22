@@ -1,0 +1,52 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Raw dataset files should not live in git.
+# Keep the parquet inputs in external storage or a data manager such as DVC.
+datasets/**/*.parquet
+datasets/**/*.ipc
+datasets/**/*.arrow
+datasets/**/*.feather
+datasets/**/*.h5
+datasets/**/*.npz
+datasets/**/*.pt
+
+# Large training artifacts from intermediate runs.
+# These are reproducible and should stay out of git.
+outputs/*/checkpoints/
+outputs/*/samples/
+
+# Per-run machine outputs that can be regenerated.
+# outputs/*/metrics.jsonl
+# outputs/*/analysis.json
+# outputs/*/physics_metrics.json
+# outputs/*/normalization.json
+
+# Sampled dataset analysis report is small enough to commit.
+!reports/dataset_analysis_sample/
+!reports/dataset_analysis_sample/**
