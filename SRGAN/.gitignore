@@ -1,0 +1,33 @@
+# Model checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+
+# NumPy sample arrays (generated outputs)
+*.npz
+
+# Entire outputs directory (checkpoints + samples from training runs)
+outputs/
+
+# Checkpoint and sample subdirs inside experiments (keep figures + markdown)
+experiments/**/checkpoints/
+experiments/**/samples/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Virtual environment (if anyone puts one here)
+.venv/
+venv/
+
+# Normalization cache (regenerated in <1 min, no need to track)
+normalization.json

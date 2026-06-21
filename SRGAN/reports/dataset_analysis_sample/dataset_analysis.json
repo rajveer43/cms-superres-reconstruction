@@ -1,0 +1,56 @@
+{
+  "files": [
+    "datasets/QCDToGGQQ_IMGjet_RH1all_jet0_run0_n36272_LR.parquet",
+    "datasets/QCDToGGQQ_IMGjet_RH1all_jet0_run1_n47540_LR.parquet",
+    "datasets/QCDToGGQQ_IMGjet_RH1all_jet0_run2_n55494_LR.parquet"
+  ],
+  "total_events": 2048,
+  "class_counts": {
+    "0": 1042,
+    "1": 1006
+  },
+  "image_shapes": {
+    "lr": [
+      3,
+      64,
+      64
+    ],
+    "hr": [
+      3,
+      125,
+      125
+    ]
+  },
+  "pt": {
+    "mean": 116.8988611921668,
+    "std": 26.818308302434417
+  },
+  "m0": {
+    "mean": 21.40950166899711,
+    "std": 6.702473419168593
+  },
+  "energy": {
+    "lr_mean": 61.08001842722297,
+    "hr_mean": 244.3200736232102,
+    "lr_to_hr_ratio_mean": 0.2500000019426807,
+    "hr_to_lr_ratio_mean": 4.0000000316649675
+  },
+  "sparsity": {
+    "lr_nonzero_fraction_mean": 0.029203097016306856,
+    "hr_nonzero_fraction_mean": 0.0174788229246019
+  },
+  "by_class": {
+    "0": {
+      "count": 1042,
+      "pt_mean": 115.47654605506706,
+      "m0_mean": 23.158535319418,
+      "response_mean": 0.25000000095813607
+    },
+    "1": {
+      "count": 1006,
+      "pt_mean": 118.37207428645898,
+      "m0_mean": 19.597878345201313,
+      "response_mean": 0.2500000029624575
+    }
+  }
+}
