@@ -10,6 +10,8 @@ The closer the GAN curves are to the HR curves, the better the physical reconstr
 
 # 1. Row (Radial) Energy Profile
 
+![Row radial energy profile comparing HR, GAN, and bicubic reconstructions.](radial_profile.png)
+
 ## What is being measured?
 
 This plot shows the average deposited energy as a function of detector radius.
@@ -55,6 +57,8 @@ This is essential for accurate particle energy reconstruction and shower charact
 ---
 
 # 2. Column (Azimuthal) Energy Profile
+
+![Column azimuthal energy profile comparing HR, GAN, and bicubic reconstructions.](azimuthal_profile.png)
 
 ## What is being measured?
 
@@ -103,6 +107,8 @@ The ability of the GAN to reconstruct these sharp structures demonstrates that i
 
 # 3. Pixel Correlation
 
+![Pixel correlation between true HR energy and GAN reconstructed energy.](pixel_correlation.png)
+
 ## What is being measured?
 
 Each point compares:
@@ -141,6 +147,8 @@ The strong correlation indicates that the reconstructed detector response remain
 ---
 
 # 4. Channel Correlation Matrix
+
+![Channel correlation heatmap comparing HR and GAN reconstruction.](channel_correlation_heatmap.png)
 
 ## What is being measured?
 
@@ -186,6 +194,8 @@ This suggests that shower evolution is maintained consistently throughout the de
 
 # 5. Sparsity Comparison
 
+![Sparsity comparison across LR, GAN, and HR reconstructions.](sparsity_comparison.png)
+
 ## What is being measured?
 
 This plot shows the fraction of detector cells containing almost no deposited energy.
@@ -229,6 +239,8 @@ This leads to more physically realistic shower reconstruction.
 ---
 
 # 6. SSIM Distribution
+
+![SSIM histogram for GAN reconstruction against HR targets.](ssim_hist.png)
 
 ## What is being measured?
 
