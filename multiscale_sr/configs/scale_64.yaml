@@ -1,0 +1,18 @@
+# LR 64x64 -> HR 125x125. Matches the detector-native parquet LR resolution.
+# Set use_native_lr: true to feed the real X_jets_LR instead of a downsampled HR.
+scale: 64
+hr_size: 125
+use_native_lr: false
+gen_channels: 64
+gen_blocks: 8
+lambda_l1: 50.0
+lambda_physics: 10.0
+lr: 2.0e-4
+d_lr_ratio: 0.5
+n_critic: 1
+real_label: 0.9
+batch_size: 64
+epochs: 50
+val_ratio: 0.33
+seed: 42
+wandb_project: multiscale-sr
