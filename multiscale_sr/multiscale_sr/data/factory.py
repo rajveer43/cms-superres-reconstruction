@@ -18,6 +18,7 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Subset
 
 from ..utils.env import EnvConfig, prefetch_generator
+from .cache import CachedJetSRDataset, ensure_hr_cache
 from .hdf5_dataset import build_hdf5_dataset
 from .multiscale import downscale_hr
 from .normalization import (
@@ -98,6 +99,44 @@ def _parquet_loader(
     )
 
 
+def _cached_parquet_loader(
+    path: Path,
+    split: str,
+    env: EnvConfig,
+    batch_size: int,
+    val_ratio: float,
+    cache_dir: Path,
+    collate,
+) -> DataLoader:
+    """Map-style loader over a one-time HR decode cache (opt-in).
+
+    The cache is built per split from exactly the same file-level split as the
+    streaming path (``split_files``), so there is no train/val leakage. Real
+    per-sample shuffling and full-dataset epochs replace reservoir streaming.
+    """
+    files = discover_parquet_files(path)
+    train_files, val_files = split_files(files, val_ratio)
+    chosen = train_files if split == "train" else val_files
+
+    split_cache = cache_dir / split
+    ensure_hr_cache(chosen, split_cache)
+    dataset = CachedJetSRDataset(split_cache)
+
+    sampler = RandomSampler(dataset) if split == "train" else SequentialSampler(dataset)
+    nw = env.num_workers
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=nw,
+        pin_memory=env.pin_memory,
+        prefetch_factor=env.prefetch_factor if nw > 0 else None,
+        persistent_workers=env.persistent_workers and nw > 0,
+        drop_last=(split == "train"),
+        collate_fn=collate,
+    )
+
+
 def _hdf5_loader(
     path: Path,
     split: str,
@@ -149,6 +188,8 @@ def get_dataloader(
     max_stats_batches: int | None = None,
     stats_cache_path: Path | None = None,
     skip_stats_cache: bool = False,
+    use_cache: bool = False,
+    cache_dir: Path | None = None,
 ) -> tuple[DataLoader, ChannelStats]:
     """Return (dataloader, channel_stats) for the requested split and scale.
 
@@ -205,9 +246,23 @@ def get_dataloader(
 
     # --- dataloader ---
     if dataset_type == "parquet":
-        loader = _parquet_loader(path, split, env, batch_size, val_ratio, reservoir_size, collate)
-        if split == "train":
-            loader = _WrappedPrefetchLoader(loader, env)  # type: ignore[assignment]
+        if use_cache:
+            if use_native_lr:
+                raise ValueError(
+                    "use_cache is incompatible with use_native_lr: the decode cache "
+                    "stores HR only (LR is derived by area-downsampling). Drop one."
+                )
+            if cache_dir is None:
+                cache_dir = path / ".sr_cache"
+            loader = _cached_parquet_loader(
+                path, split, env, batch_size, val_ratio, Path(cache_dir), collate
+            )
+        else:
+            loader = _parquet_loader(
+                path, split, env, batch_size, val_ratio, reservoir_size, collate
+            )
+            if split == "train":
+                loader = _WrappedPrefetchLoader(loader, env)  # type: ignore[assignment]
     else:
         loader = _hdf5_loader(path, split, env, batch_size, val_ratio, hr_size, collate)
 

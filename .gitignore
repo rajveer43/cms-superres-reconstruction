@@ -50,3 +50,4 @@ outputs/*/samples/
 # Sampled dataset analysis report is small enough to commit.
 !reports/dataset_analysis_sample/
 !reports/dataset_analysis_sample/**
+datasets/

@@ -74,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-train-batches", type=int, default=None)
     p.add_argument("--max-val-batches", type=int, default=None)
     p.add_argument("--max-stats-batches", type=int, default=None)
+    p.add_argument("--cache", action="store_true",
+                   help="Use a one-time HR decode cache (memmap) instead of streaming "
+                        "parquet each epoch. First run builds it; later runs read from mmap. "
+                        "Enables full-dataset epochs at ~minutes/epoch on MPS.")
+    p.add_argument("--cache-dir", type=str, default=None,
+                   help="Where to store the decode cache (default: <data-dir>/.sr_cache).")
     p.add_argument("--stats-batch-size", type=int, default=128)
     # Tagging efficiency (optional, per-epoch). Requires a pre-trained frozen
     # tagger checkpoint; without it the per-epoch tag-AUC is skipped (zero cost).
@@ -144,12 +150,14 @@ def train(args: argparse.Namespace) -> None:
         use_native_lr=use_native, val_ratio=args.val_ratio,
         max_stats_batches=args.max_stats_batches, stats_batch_size=args.stats_batch_size,
         stats_cache_path=stats_cache,
+        use_cache=args.cache, cache_dir=Path(args.cache_dir) if args.cache_dir else None,
     )
     val_loader, _ = get_dataloader(
         path=data_dir, split="val", env=env, batch_size=args.batch_size,
         scale=args.scale, hr_size=args.hr_size, dataset_type=dataset_type,
         use_native_lr=use_native, val_ratio=args.val_ratio,
         stats_cache_path=stats_cache,
+        use_cache=args.cache, cache_dir=Path(args.cache_dir) if args.cache_dir else None,
     )
 
     generator = Generator(base_channels=args.gen_channels, num_blocks=args.gen_blocks).to(env.device)
