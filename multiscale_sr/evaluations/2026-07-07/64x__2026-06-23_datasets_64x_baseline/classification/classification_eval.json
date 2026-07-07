@@ -1,0 +1,177 @@
+{
+  "scale": 64,
+  "n_train": 2822,
+  "n_test": 1210,
+  "primary_fixed_hr_tagger": {
+    "auc": {
+      "hr": 0.6979565179371707,
+      "lr": 0.5432607174868286,
+      "sr": 0.6982270511335068
+    },
+    "bkg_rej_at_50": {
+      "hr": 4.263888888888889,
+      "lr": 2.192857142857143,
+      "sr": 4.548148148148148
+    },
+    "tagging_efficiency_sr_over_hr": 1.0003876075219351,
+    "recovery_fraction_lr_to_hr": 1.0017488076311607,
+    "confusion": {
+      "hr": {
+        "tp": 354,
+        "fp": 190,
+        "tn": 424,
+        "fn": 242,
+        "accuracy": 0.6429752066115703,
+        "precision": 0.6507352941176471,
+        "recall": 0.5939597315436241,
+        "f1": 0.6210526315789473,
+        "threshold": 0.6379552483558655
+      },
+      "lr": {
+        "tp": 164,
+        "fp": 100,
+        "tn": 514,
+        "fn": 432,
+        "accuracy": 0.5603305785123966,
+        "precision": 0.6212121212121212,
+        "recall": 0.2751677852348993,
+        "f1": 0.38139534883720927,
+        "threshold": 0.8612668514251709
+      },
+      "sr": {
+        "tp": 328,
+        "fp": 155,
+        "tn": 459,
+        "fn": 268,
+        "accuracy": 0.6504132231404959,
+        "precision": 0.6790890269151139,
+        "recall": 0.5503355704697986,
+        "f1": 0.6079703429101019,
+        "threshold": 0.6493514180183411
+      }
+    },
+    "working_points": {
+      "hr": [
+        {
+          "threshold": NaN,
+          "signal_eff": 0.3,
+          "background_rej": 10.771929824561404,
+          "background_eff": 0.09283387622149837
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.5,
+          "background_rej": 4.263888888888889,
+          "background_eff": 0.23452768729641693
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.7,
+          "background_rej": 2.282527881040892,
+          "background_eff": 0.4381107491856677
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.9,
+          "background_rej": 1.4413145539906105,
+          "background_eff": 0.6938110749185668
+        }
+      ],
+      "lr": [
+        {
+          "threshold": NaN,
+          "signal_eff": 0.3,
+          "background_rej": 4.796875,
+          "background_eff": 0.20846905537459284
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.5,
+          "background_rej": 2.192857142857143,
+          "background_eff": 0.4560260586319218
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.7,
+          "background_rej": 1.4515366430260048,
+          "background_eff": 0.6889250814332247
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.9,
+          "background_rej": 1.0944741532976827,
+          "background_eff": 0.9136807817589576
+        }
+      ],
+      "sr": [
+        {
+          "threshold": NaN,
+          "signal_eff": 0.3,
+          "background_rej": 12.280000000000001,
+          "background_eff": 0.08143322475570032
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.5,
+          "background_rej": 4.548148148148148,
+          "background_eff": 0.21986970684039087
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.7,
+          "background_rej": 2.282527881040892,
+          "background_eff": 0.4381107491856677
+        },
+        {
+          "threshold": NaN,
+          "signal_eff": 0.9,
+          "background_rej": 1.3705357142857144,
+          "background_eff": 0.7296416938110749
+        }
+      ]
+    },
+    "calibration_ece": {
+      "hr": 0.09496555749542455,
+      "lr": 0.2547718548331379,
+      "sr": 0.08567350459985498
+    },
+    "score_agreement_vs_hr": {
+      "lr": {
+        "pearson_r": 0.1476665269004395,
+        "spearman_rho": 0.1661650505174313,
+        "mean_abs_score_diff": 0.24462886154651642
+      },
+      "sr": {
+        "pearson_r": 0.8448462694742992,
+        "spearman_rho": 0.841346340334356,
+        "mean_abs_score_diff": 0.09973197430372238
+      }
+    }
+  },
+  "secondary_per_source_tagger": {
+    "auc": {
+      "hr": 0.7127675272719324,
+      "lr": 0.7336805631462737,
+      "sr": 0.7065370657805565
+    }
+  },
+  "physics_correlation": {
+    "energy_correlation_vs_hr": {
+      "sr": {
+        "pearson_r": 0.9960485792527666,
+        "mean_ratio": 1.056998372077942,
+        "mean_abs_frac_diff": 0.06392381340265274
+      },
+      "lr": {
+        "pearson_r": 0.9941974158887581,
+        "mean_ratio": 1.0239595174789429,
+        "mean_abs_frac_diff": 0.0720103532075882
+      }
+    },
+    "pt_energy_pearson_r": {
+      "hr": 0.0971710846407285,
+      "lr": 0.13373157351679718,
+      "sr": 0.14230640501808892
+    }
+  }
+}
