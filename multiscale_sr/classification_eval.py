@@ -28,6 +28,13 @@ Figures produced (in <out-dir>/):
 
 Parquet only — the HDF5/CaloChallenge data has no class label.
 
+Images are drawn from the "test" split: the held-out file(s) not used for
+training are further split row-wise into val (used during training for
+checkpoint/best.pt selection — see train.py) and test (never touched until
+this evaluation). --val-ratio here must match the value the checkpoint was
+trained with, or "test" here will not line up with the held-out file group
+that checkpoint actually used.
+
 Usage
 -----
     python classification_eval.py \
@@ -54,7 +61,7 @@ from multiscale_sr.classification_metrics import (
     working_points,
 )
 from multiscale_sr.data import get_dataloader
-from multiscale_sr.data.normalization import ChannelStats
+from multiscale_sr.data.normalization import ChannelStats, denormalize
 from multiscale_sr.engine import collect_tagging_tensors
 from multiscale_sr.models import Generator
 from multiscale_sr.tagger import tagger_scores, train_tagger
@@ -75,10 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scale", type=int, default=None)
     p.add_argument("--hr-size", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--val-ratio", type=float, default=0.33)
+    p.add_argument("--val-ratio", type=float, default=0.33,
+                   help="Fraction of files held out from training (split into val/test "
+                        "row-halves); must match the checkpoint's training --val-ratio")
     p.add_argument("--max-samples", type=int, default=4000,
-                   help="Cap images materialized for tagging (train+test split from these)")
-    p.add_argument("--test-frac", type=float, default=0.3)
+                   help="Cap images materialized from the held-out test split for tagging "
+                        "(the tagger's own train/test split is drawn from these)")
+    p.add_argument("--test-frac", type=float, default=0.3,
+                   help="Fraction of materialized samples held out for the tagger's own "
+                        "eval split (independent of the SR generator's val/test split)")
     p.add_argument("--tagger-epochs", type=int, default=15)
     p.add_argument("--tagger-width", type=int, default=32)
     p.add_argument("--seed", type=int, default=42)
@@ -261,6 +273,83 @@ def _fig_calibration(cal: dict[str, object], path: Path) -> None:
     plt.close(fig)
 
 
+def _image_energy(t: "torch.Tensor", stats: ChannelStats) -> np.ndarray:
+    """Per-image total raw energy = sum over (C,H,W) after denormalizing."""
+    raw = denormalize(t.float(), stats)
+    return raw.sum(dim=(1, 2, 3)).cpu().numpy()
+
+
+def _corr_stats(x: np.ndarray, ref: np.ndarray) -> dict[str, float]:
+    """Correlation of a per-source quantity x against the HR reference ref."""
+    mask = np.isfinite(x) & np.isfinite(ref) & (ref > 0)
+    x, ref = x[mask], ref[mask]
+    r = float(np.corrcoef(x, ref)[0, 1]) if x.size > 1 else float("nan")
+    ratio = float(np.mean(x / ref)) if x.size else float("nan")
+    mad = float(np.mean(np.abs(x - ref) / ref)) if x.size else float("nan")
+    return {"pearson_r": r, "mean_ratio": ratio, "mean_abs_frac_diff": mad}
+
+
+def _fig_energy_correlation(energy: dict[str, np.ndarray], corr: dict[str, dict], path: Path) -> None:
+    """2D number-density of per-image total energy: SR-vs-HR and LR-vs-HR."""
+    plt = _plt()
+    from matplotlib.colors import LogNorm
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    hr = energy["hr"]
+    for ax, src in zip(axes, ("sr", "lr")):
+        s = energy[src]
+        lo = float(min(hr.min(), s.min()))
+        hi = float(max(hr.max(), s.max()))
+        h = ax.hist2d(hr, s, bins=60, range=[[lo, hi], [lo, hi]],
+                      norm=LogNorm(), cmap="viridis")
+        fig.colorbar(h[3], ax=ax, label="number density (events)")
+        ax.plot([lo, hi], [lo, hi], "w--", lw=1.2)
+        c = corr[src]
+        ax.set_xlabel("HR total energy (raw)")
+        ax.set_ylabel(f"{src.upper()} total energy (raw)")
+        ax.set_title(f"{src.upper()} vs HR  (r={c['pearson_r']:.3f}, "
+                     f"mean ratio={c['mean_ratio']:.3f})")
+    fig.suptitle("Per-image energy correlation (number density) — is total energy conserved?",
+                 fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def _fig_pt_correlation(energy: dict[str, np.ndarray], pt: np.ndarray,
+                        pt_corr: dict[str, float], path: Path) -> None:
+    """Per-source 2D number-density (hist2d) of jet pt (x) vs image total energy (y).
+
+    hist2d (not scatter) so the dense population shows structure; axes are clipped
+    to robust percentiles so a single high-energy jet doesn't flatten everything.
+    """
+    plt = _plt()
+    from matplotlib.colors import LogNorm
+
+    # Robust shared ranges across sources (ignore the extreme tail for the view).
+    pt_hi = float(np.nanpercentile(pt, 99))
+    pt_lo = float(np.nanmin(pt))
+    all_e = np.concatenate([energy[s] for s in _SOURCES])
+    e_hi = float(np.nanpercentile(all_e, 99))
+    e_lo = float(max(0.0, np.nanmin(all_e)))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True, sharey=True)
+    last_mesh = None
+    for ax, src in zip(axes, _SOURCES):
+        h = ax.hist2d(pt, energy[src], bins=60,
+                      range=[[pt_lo, pt_hi], [e_lo, e_hi]],
+                      norm=LogNorm(), cmap="viridis")
+        last_mesh = h[3]
+        ax.set_xlabel("jet pt")
+        ax.set_ylabel("image total energy (raw)")
+        ax.set_title(f"{_LABELS[src]}  (r(pt,E)={pt_corr[src]:.3f})")
+    fig.colorbar(last_mesh, ax=axes, label="number density (events)", shrink=0.85)
+    fig.suptitle("pt vs image-energy number density by source — does SR preserve the pt–energy band?",
+                 fontsize=12)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _fig_score_agreement(scores: dict[str, np.ndarray], agreement: dict[str, dict], path: Path) -> None:
     plt = _plt()
     fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
@@ -369,24 +458,26 @@ def main() -> None:
     if not cache.exists():
         stats.save(cache)
 
-    val_loader, _ = get_dataloader(
-        path=Path(args.data_dir), split="val", env=env, batch_size=args.batch_size,
+    test_loader, _ = get_dataloader(
+        path=Path(args.data_dir), split="test", env=env, batch_size=args.batch_size,
         scale=scale, hr_size=hr_size, dataset_type=args.dataset_format,
         val_ratio=args.val_ratio, stats_cache_path=cache,
     )
 
     print(f"[cls] materializing up to {args.max_samples} samples (scale={scale})...")
     try:
-        data = collect_tagging_tensors(gen, val_loader, stats, env.device, max_samples=args.max_samples)
+        data = collect_tagging_tensors(gen, test_loader, stats, env.device, max_samples=args.max_samples)
     except ValueError as exc:
         raise SystemExit(f"[cls] {exc}")
 
     y = data["y"]
     n = y.shape[0]
+    # Tagger's own train/test split, drawn from the SR generator's held-out
+    # "test" split — distinct from and unrelated to the generator's val/test.
     train_idx, test_idx = _split_indices(n, args.test_frac, args.seed)
     y_test = y[test_idx]
     y_test_np = y_test.numpy()
-    print(f"[cls] n={n} (train={len(train_idx)} test={len(test_idx)}) "
+    print(f"[cls] n={n} (tagger-train={len(train_idx)} tagger-test={len(test_idx)}) "
           f"class balance: {torch.bincount(y).tolist()}")
 
     out_dir = Path(args.out_dir) if args.out_dir else (
@@ -467,6 +558,26 @@ def main() -> None:
     _fig_efficiency_vs_threshold(roc, scores, y_test_np, out_dir / "efficiency_vs_threshold.png")
     _fig_calibration(cal, out_dir / "calibration.png")
     _fig_score_agreement(scores, agreement, out_dir / "score_agreement.png")
+
+    # ---- Physics correlation: per-image total energy + pt relationship ----
+    print("[cls] rendering physics-correlation figures...")
+    energy = {src: _image_energy(data[src], stats) for src in _SOURCES}
+    energy_corr = {src: _corr_stats(energy[src], energy["hr"]) for src in ("sr", "lr")}
+    _fig_energy_correlation(energy, energy_corr, out_dir / "energy_correlation.png")
+    physics: dict[str, object] = {"energy_correlation_vs_hr": energy_corr}
+
+    if "pt" in data:
+        pt_np = data["pt"].numpy()
+        pt_corr = {}
+        for src in _SOURCES:
+            m = np.isfinite(pt_np) & np.isfinite(energy[src])
+            pt_corr[src] = (float(np.corrcoef(pt_np[m], energy[src][m])[0, 1])
+                            if m.sum() > 1 else float("nan"))
+        _fig_pt_correlation(energy, pt_np, pt_corr, out_dir / "pt_correlation.png")
+        physics["pt_energy_pearson_r"] = pt_corr
+    else:
+        print("[cls] no pt in batch (HDF5?) — skipping pt_correlation.png")
+    results["physics_correlation"] = physics
 
     # ---- JSON + EXPLANATION (drop numpy arrays from the JSON payload) ----
     out_json = out_dir / "classification_eval.json"

@@ -105,6 +105,27 @@ def split_files(files: Sequence[Path], val_ratio: float) -> tuple[list[Path], li
     return list(files[:-n_val]), list(files[-n_val:])
 
 
+def held_out_row_split(row_index: int, split: str) -> bool:
+    """Deterministic row-level val/test membership within the held-out file(s).
+
+    ``split_files`` only separates *files* into train vs. held-out — with few
+    files (e.g. 3 parquet files total) that held-out group is a single file,
+    too coarse to further divide file-wise into val and test without starving
+    one of them. Instead we split *rows* of the held-out file(s) by parity of
+    the row index: even rows -> val (used for checkpoint selection during
+    training), odd rows -> test (never seen until final reporting).
+
+    This is a pure function of the row's position, so it is reproducible
+    across streaming and cached loaders without needing a stored manifest,
+    and it never depends on ``random`` state or on how many rows the file has.
+    """
+    if split == "val":
+        return row_index % 2 == 0
+    if split == "test":
+        return row_index % 2 == 1
+    raise ValueError(f"held_out_row_split only supports 'val'/'test', got {split!r}")
+
+
 def stream_channel_stats(
     source: Iterable[Tensor],
     max_batches: int | None = None,

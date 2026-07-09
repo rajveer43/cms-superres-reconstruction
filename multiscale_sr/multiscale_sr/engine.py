@@ -123,6 +123,8 @@ def collect_tagging_tensors(
     to keep memory bounded; the caller moves batches to device during training.
 
     Returns dict with keys: "hr", "lr", "sr" (each (N,3,H,W)) and "y" ((N,)).
+    Also returns "pt" and "m0" ((N,)) when the batch carries them (parquet),
+    for downstream physics-correlation plots; absent otherwise.
     Raises ValueError if the dataset has no usable (>1 class) labels.
     """
     generator.eval()
@@ -130,6 +132,8 @@ def collect_tagging_tensors(
     lr_list: list[Tensor] = []
     sr_list: list[Tensor] = []
     y_list: list[Tensor] = []
+    pt_list: list[Tensor] = []
+    m0_list: list[Tensor] = []
     seen = 0
 
     for batch in loader:
@@ -143,6 +147,10 @@ def collect_tagging_tensors(
         lr_list.append(lr_up.cpu())
         sr_list.append(sr.cpu())
         y_list.append(batch["y"].view(-1).cpu())
+        if "pt" in batch:
+            pt_list.append(batch["pt"].view(-1).cpu())
+        if "m0" in batch:
+            m0_list.append(batch["m0"].view(-1).cpu())
 
         seen += hr.shape[0]
         if max_samples is not None and seen >= max_samples:
@@ -157,12 +165,17 @@ def collect_tagging_tensors(
             "dataset provided only one (HDF5/CaloChallenge has no class label). "
             "Tagging efficiency is parquet-only."
         )
-    return {
+    out = {
         "hr": torch.cat(hr_list),
         "lr": torch.cat(lr_list),
         "sr": torch.cat(sr_list),
         "y": y,
     }
+    if pt_list:
+        out["pt"] = torch.cat(pt_list)
+    if m0_list:
+        out["m0"] = torch.cat(m0_list)
+    return out
 
 
 # --------------------------------------------------------------------------- #

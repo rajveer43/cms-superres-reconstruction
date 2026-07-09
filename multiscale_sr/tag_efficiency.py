@@ -21,6 +21,11 @@ Two analyses (both requested):
 
 Parquet only: the HDF5/CaloChallenge data has no class label.
 
+Images are drawn from the "test" split — the held-out row-half never used for
+training or for best.pt checkpoint selection (that's "val", see train.py).
+--val-ratio must match the checkpoint's training value so "test" refers to
+the same held-out file group.
+
 Usage
 -----
     python tag_efficiency.py \
@@ -57,10 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scale", type=int, default=None, help="Override scale (else from checkpoint)")
     p.add_argument("--hr-size", type=int, default=None, help="Override HR size (else from checkpoint)")
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--val-ratio", type=float, default=0.33)
+    p.add_argument("--val-ratio", type=float, default=0.33,
+                   help="Must match the checkpoint's training --val-ratio; determines "
+                        "which held-out file group 'test' is drawn from")
     p.add_argument("--max-samples", type=int, default=4000,
-                   help="Cap images materialized for tagging (train+test split from these)")
-    p.add_argument("--test-frac", type=float, default=0.3, help="Fraction held out for AUC eval")
+                   help="Cap images materialized from the held-out test split "
+                        "(the tagger's own train/test split is drawn from these)")
+    p.add_argument("--test-frac", type=float, default=0.3,
+                   help="Fraction of materialized samples held out for the tagger's own "
+                        "eval split (independent of the SR generator's val/test split)")
     p.add_argument("--tagger-epochs", type=int, default=15)
     p.add_argument("--tagger-width", type=int, default=32)
     p.add_argument("--seed", type=int, default=42)
@@ -157,23 +167,25 @@ def main() -> None:
     if not cache.exists():
         stats.save(cache)
 
-    val_loader, _ = get_dataloader(
-        path=Path(args.data_dir), split="val", env=env, batch_size=args.batch_size,
+    test_loader, _ = get_dataloader(
+        path=Path(args.data_dir), split="test", env=env, batch_size=args.batch_size,
         scale=scale, hr_size=hr_size, dataset_type=args.dataset_format,
         val_ratio=args.val_ratio, stats_cache_path=cache,
     )
 
     print(f"[tag] materializing up to {args.max_samples} samples (scale={scale})...")
     try:
-        data = collect_tagging_tensors(gen, val_loader, stats, env.device, max_samples=args.max_samples)
+        data = collect_tagging_tensors(gen, test_loader, stats, env.device, max_samples=args.max_samples)
     except ValueError as exc:
         raise SystemExit(f"[tag] {exc}")
 
     y = data["y"]
     n = y.shape[0]
+    # Tagger's own train/test split, drawn from the SR generator's held-out
+    # "test" split — distinct from and unrelated to the generator's val/test.
     train_idx, test_idx = _split_indices(n, args.test_frac, args.seed)
     y_train, y_test = y[train_idx], y[test_idx]
-    print(f"[tag] n={n} (train={len(train_idx)} test={len(test_idx)}) "
+    print(f"[tag] n={n} (tagger-train={len(train_idx)} tagger-test={len(test_idx)}) "
           f"class balance: {torch.bincount(y).tolist()}")
 
     out_dir = Path(args.out_dir) if args.out_dir else (

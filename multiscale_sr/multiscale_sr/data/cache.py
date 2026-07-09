@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import torch
@@ -139,9 +139,21 @@ class CachedJetSRDataset(Dataset):
         y  : Tensor scalar int64
     The multi-scale LR is built downstream by the collate (area-downsample HR),
     so this dataset is scale-agnostic.
+
+    ``row_filter``, when given, is applied once at construction time to the
+    cache's row indices (0..n-1) and only the rows where it returns True are
+    exposed — this is how a val/test row-parity split (see
+    ``normalization.held_out_row_split``) is carved out of a cached held-out
+    file group without decoding it twice. The index used here is the *global*
+    concatenated offset across all files in the cache (matching the ``off``
+    counter in ``build_hr_cache``), which only agrees with the streaming
+    dataset's *per-file* row index when the held-out group is a single file
+    — true for this dataset (3 parquet files total, one held out) but not
+    guaranteed in general, so this is asserted in the factory rather than
+    silently assumed.
     """
 
-    def __init__(self, cache_dir: Path) -> None:
+    def __init__(self, cache_dir: Path, row_filter: Callable[[int], bool] | None = None) -> None:
         self.cache_dir = Path(cache_dir)
         meta = json.loads((self.cache_dir / "meta.json").read_text())
         self.n, self.c, self.h, self.w = meta["n"], meta["c"], meta["h"], meta["w"]
@@ -150,6 +162,10 @@ class CachedJetSRDataset(Dataset):
         self.m0 = scal["m0"]
         self.y = scal["y"]
         self._hr = None  # opened lazily so it is safe across worker processes
+        if row_filter is None:
+            self._indices = np.arange(self.n)
+        else:
+            self._indices = np.array([i for i in range(self.n) if row_filter(i)], dtype=np.int64)
 
     def _hr_mm(self) -> np.memmap:
         if self._hr is None:
@@ -162,13 +178,14 @@ class CachedJetSRDataset(Dataset):
         return self._hr
 
     def __len__(self) -> int:
-        return self.n
+        return len(self._indices)
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        hr = np.array(self._hr_mm()[idx])  # copy out of the read-only mmap
+        i = int(self._indices[idx])
+        hr = np.array(self._hr_mm()[i])  # copy out of the read-only mmap
         return {
             "hr": torch.from_numpy(hr),
-            "pt": torch.tensor(float(self.pt[idx]), dtype=torch.float32),
-            "m0": torch.tensor(float(self.m0[idx]), dtype=torch.float32),
-            "y": torch.tensor(int(self.y[idx]), dtype=torch.int64),
+            "pt": torch.tensor(float(self.pt[i]), dtype=torch.float32),
+            "m0": torch.tensor(float(self.m0[i]), dtype=torch.float32),
+            "y": torch.tensor(int(self.y[i]), dtype=torch.int64),
         }

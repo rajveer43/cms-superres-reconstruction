@@ -11,6 +11,12 @@ Does not retrain and does not modify any baseline code — it only shells out to
 classification_eval.py with ``--out-dir`` redirected, then reads the emitted
 JSON. One failing run is logged and skipped; it never aborts the batch.
 
+Each run's ``val_ratio`` is read from its own ``config.yaml`` and forwarded
+explicitly as ``--val-ratio`` — classification_eval.py's "test" split is a
+row-half of the held-out file group determined by that ratio, so passing the
+wrong one would silently score against a different held-out set than the one
+the checkpoint actually trained against.
+
     cd multiscale_sr
     python run_evaluations.py --data-dir ../datasets
 """
@@ -51,16 +57,20 @@ def _reached_epoch(run_dir: Path) -> int | None:
 def _run_meta(run_dir: Path) -> dict:
     cfg = run_dir / "config.yaml"
     scale = epochs = None
+    val_ratio = 0.33  # must match classification_eval.py's default as a fallback
     if cfg.exists():
         for ln in cfg.read_text().splitlines():
             if ln.startswith("scale:"):
                 scale = int(ln.split(":")[1].strip())
             elif ln.startswith("epochs:"):
                 epochs = int(ln.split(":")[1].strip())
+            elif ln.startswith("val_ratio:"):
+                val_ratio = float(ln.split(":")[1].strip())
     return {
         "name": run_dir.name,
         "scale": scale,
         "cfg_epochs": epochs,
+        "val_ratio": val_ratio,
         "reached_epoch": _reached_epoch(run_dir),
         "checkpoint": str(run_dir / "checkpoints" / "best.pt"),
     }
@@ -104,6 +114,10 @@ def run_one(meta: dict, args, out_run_dir: Path) -> dict:
         "--seed", str(args.seed),
         "--max-samples", str(args.max_samples),
         "--tagger-epochs", str(args.tagger_epochs),
+        # Must match the value this checkpoint was actually trained with, else
+        # "test" here would be drawn from a different held-out file group than
+        # the one the run's config.yaml recorded (a real leak risk otherwise).
+        "--val-ratio", str(meta["val_ratio"]),
     ]
     t0 = time.time()
     with log_path.open("w") as lf:
@@ -196,6 +210,7 @@ def write_report(meta: dict, res: dict, status: str, out_run_dir: Path) -> None:
         "roc_overlay.png", "auc_summary_bar.png", "score_distributions.png",
         "confusion_matrices.png", "efficiency_vs_threshold.png",
         "calibration.png", "score_agreement.png",
+        "energy_correlation.png", "pt_correlation.png",
     ):
         md.append(f"- [{fig}](classification/{fig})")
 

@@ -24,6 +24,7 @@ from .multiscale import downscale_hr
 from .normalization import (
     ChannelStats,
     discover_parquet_files,
+    held_out_row_split,
     split_files,
     stream_channel_stats,
     stream_channel_stats_parquet,
@@ -77,14 +78,23 @@ def _parquet_loader(
     collate,
 ) -> DataLoader:
     files = discover_parquet_files(path)
-    train_files, val_files = split_files(files, val_ratio)
-    chosen = train_files if split == "train" else val_files
+    train_files, held_out_files = split_files(files, val_ratio)
+    row_filter = None
+    if split == "train":
+        chosen = train_files
+    else:
+        # "val" and "test" are two row-disjoint halves of the same held-out
+        # file(s) — see held_out_row_split. Never a different file set, so
+        # there is no way for "test" to leak into training.
+        chosen = held_out_files
+        row_filter = partial(held_out_row_split, split=split)
 
     dataset = ParquetJetSRDataset(
         files=chosen,
         batch_size=batch_size,
         shuffle_files=(split == "train"),
         reservoir_size=reservoir_size if split == "train" else 1,
+        row_filter=row_filter,
     )
     nw = env.num_workers
     return DataLoader(
@@ -110,17 +120,28 @@ def _cached_parquet_loader(
 ) -> DataLoader:
     """Map-style loader over a one-time HR decode cache (opt-in).
 
-    The cache is built per split from exactly the same file-level split as the
-    streaming path (``split_files``), so there is no train/val leakage. Real
-    per-sample shuffling and full-dataset epochs replace reservoir streaming.
+    The cache is built from exactly the same file-level split as the streaming
+    path (``split_files``), so there is no train/val(/test) leakage across
+    files. "val" and "test" share one decoded cache (the held-out file group,
+    decoded once into ``cache_dir/heldout``) and are separated by a row-parity
+    filter applied at the dataset level — see ``held_out_row_split``.
     """
     files = discover_parquet_files(path)
-    train_files, val_files = split_files(files, val_ratio)
-    chosen = train_files if split == "train" else val_files
+    train_files, held_out_files = split_files(files, val_ratio)
 
-    split_cache = cache_dir / split
-    ensure_hr_cache(chosen, split_cache)
-    dataset = CachedJetSRDataset(split_cache)
+    if split == "train":
+        split_cache = cache_dir / "train"
+        ensure_hr_cache(train_files, split_cache)
+        dataset = CachedJetSRDataset(split_cache)
+    else:
+        if len(held_out_files) != 1:
+            raise ValueError(
+                f"Cached val/test row-split assumes a single held-out file, got "
+                f"{len(held_out_files)}. Adjust val_ratio or add file-level test support."
+            )
+        split_cache = cache_dir / "heldout"
+        ensure_hr_cache(held_out_files, split_cache)
+        dataset = CachedJetSRDataset(split_cache, row_filter=partial(held_out_row_split, split=split))
 
     sampler = RandomSampler(dataset) if split == "train" else SequentialSampler(dataset)
     nw = env.num_workers
@@ -155,7 +176,11 @@ def _hdf5_loader(
         subset = Subset(dataset, indices)
         sampler = RandomSampler(subset)
     else:
-        indices = list(range(n_train, n))
+        # "val"/"test" split the held-out index range by row parity, same
+        # scheme as the parquet path (held_out_row_split) — no HDF5 index
+        # is ever visible to training regardless of which half it lands in.
+        held_out = range(n_train, n)
+        indices = [n_train + i for i in range(len(held_out)) if held_out_row_split(i, split)]
         subset = Subset(dataset, indices)
         sampler = SequentialSampler(subset)
 
@@ -196,7 +221,14 @@ def get_dataloader(
     Stats are computed once on HR by streaming the training split, then cached
     to stats_cache_path. Subsequent calls reuse the cache unless
     skip_stats_cache=True. HR statistics are the reference scale for every model.
+
+    ``split`` is one of "train", "val", "test". "val" and "test" are two
+    row-disjoint halves of the same held-out file(s) (never the train files):
+    "val" is for in-training checkpoint selection, "test" is the one held-out
+    set that should be evaluated only once, for final reported numbers.
     """
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"split must be 'train', 'val', or 'test', got {split!r}")
     path = Path(path)
     if dataset_type is None:
         dataset_type = detect_dataset_type(path)
