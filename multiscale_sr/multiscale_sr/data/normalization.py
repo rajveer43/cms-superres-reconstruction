@@ -170,13 +170,18 @@ def stream_channel_stats_parquet(
     files: Sequence[Path],
     batch_size: int,
     max_batches: int | None = None,
+    hr_size: int = 125,
 ) -> ChannelStats:
     """Convenience wrapper: stream parquet HR images directly (no DataLoader).
 
     Stats are computed on the HR channel only — the multi-scale LR inputs are
     derived from HR at train time, so HR statistics are the correct reference
-    scale for every model regardless of its input resolution.
+    scale for every model regardless of its input resolution. HR is zero-padded
+    to hr_size first (same as the training collate — see
+    ``multiscale.pad_to_size``) so stats reflect exactly what the model trains
+    on, including the padded border's exact-zero contribution.
     """
+    from .multiscale import pad_to_size
 
     def _iter() -> Iterable[Tensor]:
         seen = 0
@@ -187,7 +192,7 @@ def stream_channel_stats_parquet(
                 columns=[IMAGE_COLUMNS[1]],  # HR column only
                 use_threads=True,
             ):
-                yield batch_to_tensor(batch.column(0))
+                yield pad_to_size(batch_to_tensor(batch.column(0)), hr_size)
                 seen += 1
                 if max_batches is not None and seen >= max_batches:
                     return

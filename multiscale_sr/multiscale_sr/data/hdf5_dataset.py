@@ -49,7 +49,7 @@ class HDF5JetDataset(Dataset):
     def __init__(
         self,
         path: Path,
-        hr_size: int = 125,
+        hr_size: int = 128,
     ) -> None:
         super().__init__()
         self.path = Path(path)
@@ -116,7 +116,7 @@ class HDF5JetDataset(Dataset):
 
 def build_hdf5_dataset(
     data_dir: Path,
-    hr_size: int = 125,
+    hr_size: int = 128,
 ) -> ConcatDataset:
     """Load all dataset_2_*.hdf5 files in data_dir as a single ConcatDataset."""
     files = sorted(data_dir.glob("dataset_2_*.hdf5"))

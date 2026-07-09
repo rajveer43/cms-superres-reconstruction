@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset-format", type=str, default=None, choices=["parquet", "hdf5"],
                    help="Force dataset format (auto-detected if omitted)")
     p.add_argument("--scale", type=int, default=None, help="LR resolution: e.g. 64, 32, 16")
-    p.add_argument("--hr-size", type=int, default=125, help="Target HR square size")
+    p.add_argument("--hr-size", type=int, default=128, help="Target HR square size")
     p.add_argument("--use-native-lr", action="store_true",
                    help="Use detector-native LR (parquet only) instead of downsampling HR")
     p.add_argument("--epochs", type=int, default=50)

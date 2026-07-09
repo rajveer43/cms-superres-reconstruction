@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Subse
 from ..utils.env import EnvConfig, prefetch_generator
 from .cache import CachedJetSRDataset, ensure_hr_cache
 from .hdf5_dataset import build_hdf5_dataset
-from .multiscale import downscale_hr
+from .multiscale import downscale_hr, pad_to_size
 from .normalization import (
     ChannelStats,
     discover_parquet_files,
@@ -48,13 +48,19 @@ def _multiscale_collate(
     samples: list[dict],
     scale: int,
     use_native_lr: bool,
+    hr_size: int = 128,
 ) -> dict[str, torch.Tensor]:
     """Collate individual samples into a batch and build the scaled LR.
 
-    LR is produced by area-downsampling the batched HR to (scale, scale) — the
-    single place multi-scale inputs are created, so parquet and HDF5 are identical.
+    HR is zero-padded (centered) from its native 125x125 up to hr_size before
+    LR is derived, so LR and HR are always consistent with each other. Padding
+    (not resizing) keeps every real decoded pixel value untouched — see
+    ``pad_to_size``. LR is produced by area-downsampling the padded HR to
+    (scale, scale) — the single place multi-scale inputs are created, so
+    parquet and HDF5 are identical.
     """
     hr = torch.stack([s["hr"] for s in samples], dim=0)  # (B,3,H,W)
+    hr = pad_to_size(hr, hr_size)
     if use_native_lr:
         lr = torch.stack([s["lr_native"] for s in samples], dim=0)
     else:
@@ -204,7 +210,7 @@ def get_dataloader(
     env: EnvConfig,
     batch_size: int,
     scale: int,
-    hr_size: int = 125,
+    hr_size: int = 128,
     dataset_type: str | None = None,
     use_native_lr: bool = False,
     val_ratio: float = 0.33,
@@ -249,6 +255,7 @@ def get_dataloader(
                 train_files,
                 batch_size=stats_batch_size,
                 max_batches=max_stats_batches,
+                hr_size=hr_size,
             )
         else:
             tmp_ds = build_hdf5_dataset(path, hr_size=hr_size)
@@ -274,7 +281,7 @@ def get_dataloader(
             stats.save(stats_cache_path)
             print(f"[data] stats saved to {stats_cache_path}")
 
-    collate = partial(_multiscale_collate, scale=scale, use_native_lr=use_native_lr)
+    collate = partial(_multiscale_collate, scale=scale, use_native_lr=use_native_lr, hr_size=hr_size)
 
     # --- dataloader ---
     if dataset_type == "parquet":

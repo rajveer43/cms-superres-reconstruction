@@ -33,3 +33,24 @@ def downscale_hr(hr: Tensor, scale: int) -> Tensor:
 
     lr = F.interpolate(hr.float(), size=(scale, scale), mode="area").clamp_min(0.0)
     return lr.squeeze(0) if squeeze else lr
+
+
+def pad_to_size(hr: Tensor, size: int) -> Tensor:
+    """Zero-pad an HR image (or batch) up to a square (size, size), centered.
+
+    Accepts (C, H, W) or (B, C, H, W); returns the same rank. Used to bring
+    the parquet HR's native 125x125 up to a power-of-two target (128) so the
+    generator's learned upsampling stages land exactly on target_size with no
+    bicubic remainder step — zero-padding (rather than resizing) adds only
+    inert empty-energy border pixels and leaves every real pixel value exactly
+    as decoded. No-op if hr is already >= size on both spatial dims.
+    """
+    h, w = hr.shape[-2], hr.shape[-1]
+    pad_h, pad_w = max(0, size - h), max(0, size - w)
+    if pad_h == 0 and pad_w == 0:
+        return hr
+    top = pad_h // 2
+    bottom = pad_h - top
+    left = pad_w // 2
+    right = pad_w - left
+    return F.pad(hr, (left, right, top, bottom), mode="constant", value=0.0)

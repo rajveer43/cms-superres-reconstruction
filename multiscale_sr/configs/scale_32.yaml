@@ -1,6 +1,7 @@
-# LR 32x32 -> HR 125x125. HR area-downsampled to 32x32 as the model input.
+# LR 32x32 -> HR 125x125 zero-padded to 128x128 (power-of-two target for clean
+# 2x upsampling stages). HR area-downsampled to 32x32 as the model input.
 scale: 32
-hr_size: 125
+hr_size: 128
 use_native_lr: false
 gen_channels: 64
 gen_blocks: 8

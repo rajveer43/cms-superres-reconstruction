@@ -1,7 +1,8 @@
-# LR 64x64 -> HR 125x125. Matches the detector-native parquet LR resolution.
+# LR 64x64 -> HR 125x125 zero-padded to 128x128 (power-of-two target for clean
+# 2x upsampling stages). 64x64 matches the detector-native parquet LR resolution.
 # Set use_native_lr: true to feed the real X_jets_LR instead of a downsampled HR.
 scale: 64
-hr_size: 125
+hr_size: 128
 use_native_lr: false
 gen_channels: 64
 gen_blocks: 8
