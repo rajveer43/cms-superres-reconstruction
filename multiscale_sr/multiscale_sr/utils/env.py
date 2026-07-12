@@ -63,6 +63,14 @@ def resolve_env() -> EnvConfig:
         use_amp = False
         dtype = torch.float32
 
+    # Escape hatch: fork()+pyarrow/memmap can deadlock the DataLoader on some
+    # containerised CUDA runtimes (observed hanging on Colab after the decode
+    # cache is built, GPU idle). Set MULTISCALE_SR_NUM_WORKERS=0 to force the
+    # in-process prefetch path used on MPS. Overrides the auto value above.
+    _nw_override = os.environ.get("MULTISCALE_SR_NUM_WORKERS")
+    if _nw_override is not None and _nw_override.strip() != "":
+        num_workers = max(0, int(_nw_override))
+
     persistent_workers = num_workers > 0 and device.type != "mps"
     prefetch_factor = 4 if num_workers > 0 else None
 
