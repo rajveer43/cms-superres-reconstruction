@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+_DEBUG = os.environ.get("MULTISCALE_SR_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 class ResidualBlock(nn.Module):
@@ -74,9 +77,21 @@ class Generator(nn.Module):
     works across LR scales.
     """
 
-    def __init__(self, in_channels: int = 3, base_channels: int = 64, num_blocks: int = 8) -> None:
+    def __init__(
+        self,
+        in_channels: int = 3,
+        base_channels: int = 64,
+        num_blocks: int = 8,
+        lr_skip: bool = True,
+    ) -> None:
         super().__init__()
         self.in_channels = in_channels
+        # Add a bicubic-upsampled LR skip (global residual) to the learned
+        # output. Helpful when LR already carries most of the low-frequency
+        # energy, but for very sparse deposits it can inject a blurred prior the
+        # residual head then has to subtract back out; expose it so it can be
+        # disabled per experiment.
+        self.lr_skip = lr_skip
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, kernel_size=7, padding=3),
             nn.ReLU(inplace=True),
@@ -99,12 +114,22 @@ class Generator(nn.Module):
         in_h = lr.shape[-2]
         target_h = target_size[0]
         n_stages = min(self._max_up_stages, max(0, math.ceil(math.log2(max(target_h / in_h, 1.0)))))
+        if _DEBUG:
+            print(f"[gen] in={in_h} target={target_h} n_stages={n_stages}")
 
         x = self.stem(lr)
         for stage in self.up_stages[:n_stages]:
             x = stage(x)
 
-        lr_up = F.interpolate(lr, size=target_size, mode="bicubic", align_corners=False)
-        x = F.interpolate(x, size=target_size, mode="bicubic", align_corners=False)
+        # Nearest for the (usually no-op) remainder resize: bicubic overshoots
+        # and rings on sparse deposits, pre-blurring peaks the residual head
+        # then cannot recover. Nearest preserves peak magnitude and location.
+        if x.shape[-2:] != tuple(target_size):
+            x = F.interpolate(x, size=target_size, mode="nearest")
         x = self.body(x)
-        return lr_up + self.to_image(x)
+        out = self.to_image(x)
+
+        if self.lr_skip:
+            lr_up = F.interpolate(lr, size=target_size, mode="bicubic", align_corners=False)
+            out = out + lr_up
+        return out

@@ -48,6 +48,49 @@ def physics_loss(pred_raw: Tensor, target_raw: Tensor) -> Tensor:
     return (energy_response(pred_raw, target_raw) - 1.0).abs().mean()
 
 
+def weighted_l1_loss(
+    pred: Tensor, target: Tensor, weighting: str = "energy", alpha: float = 5.0
+) -> Tensor:
+    """L1 that can up-weight bright HR pixels to fight the 'predict small' optimum.
+
+    On ~97%-zero calorimeter targets, plain mean-L1 is minimized by outputting
+    near-zero everywhere: the few bright deposits contribute almost nothing to
+    the average, so the generator collapses energy into a dim blob (peaks lost,
+    PSNR falling while L1 falls). ``weighting="energy"`` scales each pixel's
+    error by ``1 + alpha * relu(target)`` so real deposits dominate the loss and
+    the generator is pushed to reproduce peaks. ``weighting="uniform"`` reduces
+    to standard mean-L1.
+
+    ``target`` is the normalized (log1p+z-score) HR; relu drops the negative
+    background floor so only genuine positive-energy pixels get extra weight.
+    """
+    err = (pred - target).abs()
+    if weighting == "uniform":
+        return err.mean()
+    if weighting != "energy":
+        raise ValueError(f"weighting must be 'uniform' or 'energy', got {weighting!r}")
+    w = 1.0 + alpha * target.clamp_min(0.0)
+    return (err * w).sum() / w.sum().clamp_min(1e-6)
+
+
+@torch.no_grad()
+def peak_metrics(pred: Tensor, target: Tensor, nonzero_thresh: float = 0.0) -> dict[str, float]:
+    """Per-batch peak-fidelity diagnostics (normalized tensors).
+
+    ``peak_ratio`` = mean over samples of max(pred)/max(target): ~1.0 means SR
+    peaks match HR; <1 means the collapse/dimming this pipeline is prone to.
+    ``nonzero_ratio`` = (# pred pixels above thresh) / (# target pixels above
+    thresh): <1 means SR is sparser/emptier than HR (energy smeared away).
+    """
+    pred_max = pred.amax(dim=(1, 2, 3))
+    tgt_max = target.amax(dim=(1, 2, 3))
+    peak_ratio = (pred_max / tgt_max.clamp_min(1e-6)).mean().item()
+    pred_nz = (pred > nonzero_thresh).float().sum().item()
+    tgt_nz = (target > nonzero_thresh).float().sum().item()
+    nonzero_ratio = pred_nz / max(tgt_nz, 1.0)
+    return {"peak_ratio": peak_ratio, "nonzero_ratio": nonzero_ratio}
+
+
 # --------------------------------------------------------------------------- #
 # Metrics
 # --------------------------------------------------------------------------- #
@@ -78,6 +121,8 @@ def evaluate(
     pix_count = 0
     psnr_sum = 0.0
     resp_sum = 0.0
+    peak_sum = 0.0
+    nonzero_sum = 0.0
     n_batches = 0
 
     for batch in loader:
@@ -93,6 +138,10 @@ def evaluate(
         hr_raw = denormalize(hr.float(), stats)
         resp_sum += energy_response(fake_raw, hr_raw).mean().item()
 
+        pk = peak_metrics(fake, hr)
+        peak_sum += pk["peak_ratio"]
+        nonzero_sum += pk["nonzero_ratio"]
+
         n_batches += 1
         if max_batches is not None and n_batches >= max_batches:
             break
@@ -102,6 +151,8 @@ def evaluate(
         "l1": l1_sum / max(pix_count, 1),
         "psnr_norm": psnr_sum / n,
         "energy_response": resp_sum / n,
+        "peak_ratio": peak_sum / n,
+        "nonzero_ratio": nonzero_sum / n,
     }
 
 
@@ -190,11 +241,16 @@ def render_sample_grid(
     path: Path,
     n_samples: int = 4,
 ) -> np.ndarray:
-    """Save an [LR (bicubic up) | SR | HR] comparison grid as a PNG.
+    """Save an [LR (bicubic up) | SR | HR | SR-HR residual] comparison grid.
 
     Returns the rendered RGB array (H,W,3) so callers can also log it to W&B
     without re-reading the file. Channels are summed to a single intensity map
     (calorimeter energy) and log-scaled for visibility on sparse deposits.
+
+    LR/SR/HR share a single per-row vmax (taken from the HR panel) so a dim SR
+    reads as genuinely dim energy rather than an artifact of per-panel
+    autoscaling — the failure mode this pipeline is prone to. The 4th column is
+    the signed SR-HR residual on a symmetric diverging scale.
     """
     import matplotlib
 
@@ -219,18 +275,33 @@ def render_sample_grid(
         img = t.sum(dim=0)  # sum channels -> energy map
         return np.log1p(img.numpy())
 
-    fig, axes = plt.subplots(n, 3, figsize=(9, 3 * n))
+    fig, axes = plt.subplots(n, 4, figsize=(12, 3 * n))
     if n == 1:
-        axes = axes.reshape(1, 3)
-    col_titles = ["LR (bicubic up)", "Super-Resolved", "Ground Truth (HR)"]
+        axes = axes.reshape(1, 4)
+    col_titles = ["LR (bicubic up)", "Super-Resolved", "Ground Truth (HR)", "SR - HR"]
     for row in range(n):
-        for col, src in enumerate((lr_up[row], fake_raw[row], hr_raw[row])):
+        lr_img = _to_img(lr_up[row])
+        sr_img = _to_img(fake_raw[row])
+        hr_img = _to_img(hr_raw[row])
+        # Shared intensity scale for LR/SR/HR: HR sets the ceiling so a dim SR
+        # is visibly dim, not silently rescaled to look bright.
+        vmax = max(float(hr_img.max()), 1e-6)
+        for col, img in enumerate((lr_img, sr_img, hr_img)):
             ax = axes[row, col]
-            ax.imshow(_to_img(src), cmap="inferno", origin="lower")
+            ax.imshow(img, cmap="inferno", origin="lower", vmin=0.0, vmax=vmax)
             ax.set_xticks([])
             ax.set_yticks([])
             if row == 0:
                 ax.set_title(col_titles[col], fontsize=11)
+        # Residual on a symmetric diverging scale.
+        resid = sr_img - hr_img
+        rmax = max(float(np.abs(resid).max()), 1e-6)
+        axr = axes[row, 3]
+        axr.imshow(resid, cmap="RdBu_r", origin="lower", vmin=-rmax, vmax=rmax)
+        axr.set_xticks([])
+        axr.set_yticks([])
+        if row == 0:
+            axr.set_title(col_titles[3], fontsize=11)
     fig.tight_layout()
 
     path.parent.mkdir(parents=True, exist_ok=True)

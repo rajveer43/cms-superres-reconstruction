@@ -33,6 +33,7 @@ from multiscale_sr.engine import (
     physics_loss,
     render_metrics_plot,
     render_sample_grid,
+    weighted_l1_loss,
 )
 from multiscale_sr.experiment import load_config, make_experiment_dir, save_config
 from multiscale_sr.models import Discriminator, Generator
@@ -59,10 +60,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--d-lr-ratio", type=float, default=0.5, help="D LR = lr * ratio (TTUR)")
     p.add_argument("--gen-channels", type=int, default=64)
     p.add_argument("--gen-blocks", type=int, default=8)
-    p.add_argument("--lambda-l1", type=float, default=50.0)
+    p.add_argument("--no-lr-skip", action="store_true",
+                   help="Disable the generator's bicubic LR global-residual skip")
+    p.add_argument("--lambda-l1", type=float, default=10.0)
     p.add_argument("--lambda-physics", type=float, default=10.0)
+    p.add_argument("--lambda-adv", type=float, default=1.0, help="Peak adversarial loss weight")
+    p.add_argument("--l1-weighting", type=str, default="energy", choices=["uniform", "energy"],
+                   help="Up-weight bright HR pixels in L1 to prevent the 'predict small' collapse")
+    p.add_argument("--l1-weight-alpha", type=float, default=5.0,
+                   help="Energy-weighting strength for --l1-weighting energy")
     p.add_argument("--real-label", type=float, default=0.9, help="One-sided label smoothing target")
-    p.add_argument("--n-critic", type=int, default=1, help="Update D once every N G steps")
+    p.add_argument("--n-critic", type=int, default=1, help="(legacy) Update D once every N G steps")
+    # Adversarial stabilization: warm up G on L1+physics, then ramp adv weight,
+    # throttle D so it cannot win outright, and add annealed instance noise.
+    p.add_argument("--adv-warmup-epochs", type=int, default=3,
+                   help="Epochs with L1+physics only (no D updates, adv weight 0)")
+    p.add_argument("--adv-ramp-epochs", type=int, default=5,
+                   help="Epochs to linearly ramp adv weight 0 -> lambda_adv after warmup")
+    p.add_argument("--g-steps-per-d", type=int, default=2,
+                   help="Update D once per N generator steps (D throttle)")
+    p.add_argument("--d-loss-floor", type=float, default=0.1,
+                   help="Skip the D update on a batch if its d_loss is below this floor")
+    p.add_argument("--d-input-noise", type=float, default=0.05,
+                   help="Std of Gaussian instance noise added to D's HR inputs (annealed to 0)")
     p.add_argument("--val-ratio", type=float, default=0.33)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--run-name", type=str, default="run")
@@ -160,7 +180,9 @@ def train(args: argparse.Namespace) -> None:
         use_cache=args.cache, cache_dir=Path(args.cache_dir) if args.cache_dir else None,
     )
 
-    generator = Generator(base_channels=args.gen_channels, num_blocks=args.gen_blocks).to(env.device)
+    generator = Generator(
+        base_channels=args.gen_channels, num_blocks=args.gen_blocks, lr_skip=not args.no_lr_skip
+    ).to(env.device)
     discriminator = Discriminator().to(env.device)
     opt_g = torch.optim.Adam(generator.parameters(), lr=args.lr, betas=(0.5, 0.999))
     opt_d = torch.optim.Adam(discriminator.parameters(), lr=args.lr * args.d_lr_ratio, betas=(0.5, 0.999))
@@ -194,6 +216,25 @@ def train(args: argparse.Namespace) -> None:
         run_name=f"{dataset_name}_{args.scale}x_{args.run_name}", config=config, dir=paths.root,
     )
 
+    def _adv_weight(epoch: int) -> float:
+        """0 during warmup, linear ramp to lambda_adv over adv_ramp_epochs, then flat."""
+        e = epoch - start_epoch  # 0-based position in this run
+        if e < args.adv_warmup_epochs:
+            return 0.0
+        ramp = args.adv_ramp_epochs
+        if ramp <= 0:
+            return args.lambda_adv
+        frac = min(1.0, (e - args.adv_warmup_epochs + 1) / ramp)
+        return args.lambda_adv * frac
+
+    def _noise_std(epoch: int) -> float:
+        """Instance-noise std annealed linearly to 0 over the whole run."""
+        if args.d_input_noise <= 0:
+            return 0.0
+        span = max(1, args.epochs - start_epoch)
+        frac = 1.0 - (epoch - start_epoch) / span
+        return args.d_input_noise * max(0.0, frac)
+
     history: list[dict] = []
     global_step = 0
     for epoch in range(start_epoch, args.epochs + 1):
@@ -202,6 +243,12 @@ def train(args: argparse.Namespace) -> None:
         g_run = d_run = l1_run = phys_run = resp_run = 0.0
         last_d = 0.0
         seen = 0
+        d_updates = 0
+        d_eligible = 0
+
+        adv_w = _adv_weight(epoch)
+        noise_std = _noise_std(epoch)
+        adv_active = adv_w > 0.0
 
         train_iter = train_loader
         if args.max_train_batches is not None:
@@ -215,20 +262,37 @@ def train(args: argparse.Namespace) -> None:
             fake_raw = denormalize(fake, stats)
             hr_raw = denormalize(hr, stats)
 
-            if step % args.n_critic == 0:
-                real_logits = discriminator(lr, hr)
-                fake_logits_d = discriminator(lr, fake.detach())
+            # --- Discriminator update (throttled + floored + instance noise) ---
+            # Skipped entirely during adversarial warmup so G first learns
+            # coarse structure from L1+physics alone.
+            if adv_active and (step % args.g_steps_per_d == 0):
+                d_eligible += 1
+                if noise_std > 0:
+                    real_in = hr + torch.randn_like(hr) * noise_std
+                    fake_in = fake.detach() + torch.randn_like(fake) * noise_std
+                else:
+                    real_in = hr
+                    fake_in = fake.detach()
+                real_logits = discriminator(lr, real_in)
+                fake_logits_d = discriminator(lr, fake_in)
                 d_loss = discriminator_loss(real_logits, fake_logits_d, args.real_label)
-                opt_d.zero_grad(set_to_none=True)
-                d_loss.backward()
-                opt_d.step()
+                # Don't let an already-winning D keep sharpening — that is what
+                # collapses the adversarial gradient to G.
+                if d_loss.item() >= args.d_loss_floor:
+                    opt_d.zero_grad(set_to_none=True)
+                    d_loss.backward()
+                    opt_d.step()
+                    d_updates += 1
                 last_d = d_loss.item()
 
-            fake_logits_g = discriminator(lr, fake)
-            adv = generator_adv_loss(fake_logits_g)
-            l1 = torch.nn.functional.l1_loss(fake, hr)
+            # --- Generator update ---
+            l1 = weighted_l1_loss(fake, hr, weighting=args.l1_weighting, alpha=args.l1_weight_alpha)
             phys = physics_loss(fake_raw, hr_raw)
-            g_loss = adv + args.lambda_l1 * l1 + args.lambda_physics * phys
+            g_loss = args.lambda_l1 * l1 + args.lambda_physics * phys
+            if adv_active:
+                fake_logits_g = discriminator(lr, fake)
+                adv = generator_adv_loss(fake_logits_g)
+                g_loss = g_loss + adv_w * adv
 
             opt_g.zero_grad(set_to_none=True)
             g_loss.backward()
@@ -253,12 +317,14 @@ def train(args: argparse.Namespace) -> None:
                         "step/d_loss": d_val,
                         "step/l1": l1_val,
                         "step/phys": phys_val,
+                        "step/adv_weight": adv_w,
                         "epoch": epoch,
                     },
                     step=global_step,
                 )
 
         denom = max(seen, 1)
+        d_skip_frac = 1.0 - (d_updates / d_eligible) if d_eligible else 0.0
         train_metrics = {
             "epoch": epoch,
             "train_g_loss": g_run / denom,
@@ -266,6 +332,9 @@ def train(args: argparse.Namespace) -> None:
             "train_l1": l1_run / denom,
             "train_phys": phys_run / denom,
             "train_response": resp_run / denom,
+            "adv_weight": adv_w,
+            "d_skip_frac": d_skip_frac,
+            "d_input_noise": noise_std,
         }
         val_metrics = evaluate(generator, val_loader, stats, env.device, max_batches=args.max_val_batches)
         record = {**train_metrics, **{f"val_{k}": v for k, v in val_metrics.items()}}
@@ -292,7 +361,9 @@ def train(args: argparse.Namespace) -> None:
             f"epoch {epoch:03d} g={record['train_g_loss']:.4f} d={record['train_d_loss']:.4f} "
             f"l1={record['train_l1']:.4f} phys={record['train_phys']:.4f} "
             f"val_l1={record['val_l1']:.4f} val_psnr={record['val_psnr_norm']:.2f} "
-            f"resp={record['val_energy_response']:.3f}"
+            f"resp={record['val_energy_response']:.3f} "
+            f"peak={record['val_peak_ratio']:.3f} nz={record['val_nonzero_ratio']:.3f} "
+            f"advw={adv_w:.2f} dskip={d_skip_frac:.2f}"
         )
         with paths.metrics_jsonl.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
