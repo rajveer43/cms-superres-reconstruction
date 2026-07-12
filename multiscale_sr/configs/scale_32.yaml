@@ -17,7 +17,7 @@ real_label: 0.9
 adv_warmup_epochs: 3
 adv_ramp_epochs: 5
 g_steps_per_d: 2
-d_loss_floor: 0.1
+d_loss_floor: 0.05
 d_input_noise: 0.05
 batch_size: 64
 epochs: 50
