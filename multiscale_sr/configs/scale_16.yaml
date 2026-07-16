@@ -17,10 +17,10 @@ real_label: 0.9
 adv_warmup_epochs: 3
 adv_ramp_epochs: 5
 g_steps_per_d: 2
-d_loss_floor: 0.05
+d_loss_floor: 0.02   # 16x settles at d~0.04; 0.02 keeps D active instead of frozen
 d_input_noise: 0.05
 batch_size: 64
-epochs: 50
+epochs: 40
 val_ratio: 0.33
 seed: 42
 wandb_project: multiscale-sr
