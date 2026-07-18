@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jetsr-swin"
+version = "0.1.0"
+description = "SwinIR transformer super-resolution for CMS calorimeter jet images (GSoC 2026)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "torch>=2.1",
+    "matplotlib>=3.7",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "wandb>=0.16",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+sweep = [
+    "optuna>=3.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: tests requiring CUDA",
+    "slow: tests that take >5s",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,12 @@
+outputs/
+wandb/
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+*.pt
+*.pth
+*.npz
+.env
+

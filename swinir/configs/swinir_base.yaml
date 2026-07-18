@@ -1,0 +1,51 @@
+# SwinIR base — no conditioning, no GAN.
+# This is the apples-to-apples comparison vs the residual-CNN GAN baseline.
+data_dir: ../datasets
+output_dir: outputs/swinir_base
+
+val_ratio: 0.33
+test_ratio: 0.0
+batch_size: 8
+stats_batch_size: 32
+max_stats_batches: 10
+batch_buffer_size: 8
+max_train_batches: null   # null = full data (~10500 batches/epoch). Set to 100 for quick smoke-tests.
+max_val_batches: null     # null = full val file
+
+epochs: 20
+lr: 2.0e-4
+weight_decay: 1.0e-4
+warmup_epochs: 1
+grad_clip: 1.0
+lambda_l1: 50.0
+lambda_phys: 12.0
+
+seed: 42
+device: null
+amp: true
+
+include_meta: false
+wandb_enabled: true
+wandb_project: null     # falls back to $WANDB_PROJECT
+run_name: swinir_base
+log_every_n_steps: 20
+log_attention_every_n_epochs: 1
+log_samples_every_n_epochs: 1
+hook_target_substrings: ["blocks.0", "blocks.1", "blocks.2", "blocks.3"]
+
+model:
+  in_channels: 3
+  embed_dim: 96
+  num_blocks: 4
+  num_heads: 6
+  window_size: 4
+  mlp_ratio: 4.0
+  drop: 0.0
+  attn_drop: 0.0
+  out_size: [125, 125]
+  upsample_mid_channels: 48
+  use_global_skip: true
+  use_film: false
+  num_classes: 2
+  cond_hidden: 64
+  cond_dim: 128
