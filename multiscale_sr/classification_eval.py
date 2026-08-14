@@ -93,7 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "eval split (independent of the SR generator's val/test split)")
     p.add_argument("--tagger-epochs", type=int, default=15)
     p.add_argument("--tagger-width", type=int, default=32)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--eval-seed", type=int, default=0,
+                   help="Seed for the MEASUREMENT ONLY: global RNG, the tagger's train/test "
+                        "split, and tagger init/batch order. Must be held FIXED across SR "
+                        "checkpoints being compared, so the ruler does not move between them. "
+                        "Never set this to the SR training seed.")
+    p.add_argument("--seed", type=int, default=None,
+                   help="DEPRECATED alias for --eval-seed (kept so older scripts keep running).")
+    p.add_argument("--tagger-checkpoint", type=str, default=None,
+                   help="Path to a frozen HR tagger. Loaded if it exists, otherwise the tagger "
+                        "is trained and saved here. Reusing one artifact across SR checkpoints "
+                        "is what makes HR/LR AUC constant across runs.")
     p.add_argument("--out-dir", type=str, default=None,
                    help="Default: <run>/figures/classification")
     p.add_argument("--skip-per-source", action="store_true",
@@ -434,9 +444,77 @@ SR (generator output, the recovery).
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def _resolve_eval_seed(args: argparse.Namespace) -> int:
+    """Fold the deprecated --seed into --eval-seed.
+
+    --seed used to drive both the measurement and (when callers passed the SR
+    training seed) vary with the model under test, which confounded model
+    variance with evaluation noise. It is honoured with a warning.
+    """
+    if args.seed is None:
+        return args.eval_seed
+    if args.eval_seed != 0 and args.seed != args.eval_seed:
+        raise SystemExit(
+            f"--seed ({args.seed}) and --eval-seed ({args.eval_seed}) both given and disagree; "
+            "pass only --eval-seed."
+        )
+    print(f"[cls] WARNING: --seed is deprecated; using --eval-seed={args.seed}. "
+          "Hold this value FIXED across SR checkpoints you intend to compare.")
+    return args.seed
+
+
+def _load_or_train_hr_tagger(path_str: str | None, images, labels, device,
+                             width: int, epochs: int, seed: int, test_idx,
+                             test_frac: float | None = None, n: int | None = None):
+    """Return (tagger, provenance). Loads a frozen tagger if one is cached.
+
+    The cached artifact carries the tagger-test indices and the split/seed it was
+    built with; a mismatch means the frozen tagger's training rows overlap the
+    caller's evaluation rows, so we refuse rather than silently leak.
+    """
+    from multiscale_sr.tagger import JetTagger
+
+    if path_str is None:
+        tagger = train_tagger(images, labels, device, width=width, epochs=epochs, seed=seed)
+        return tagger, {"source": "trained-inline", "checkpoint": None}
+
+    path = Path(path_str)
+    if path.exists():
+        blob = torch.load(path, map_location=device)
+        cached_test = torch.as_tensor(blob["test_idx"])
+        if not torch.equal(cached_test.cpu(), test_idx.cpu()):
+            raise SystemExit(
+                f"[cls] frozen tagger {path} was built with a different tagger-train/test split "
+                f"(cached eval_seed={blob.get('eval_seed')}, test_frac={blob.get('test_frac')}, "
+                f"n={blob.get('n')}). Reusing it would evaluate on rows it trained on. "
+                "Rebuild it, or match --eval-seed/--test-frac/--max-samples to the cached values."
+            )
+        tagger = JetTagger(in_channels=blob["in_channels"], width=blob["width"]).to(device)
+        tagger.load_state_dict(blob["tagger"])
+        tagger.eval()
+        print(f"[cls] loaded FROZEN HR tagger from {path} (eval_seed={blob.get('eval_seed')})")
+        return tagger, {"source": "loaded-frozen", "checkpoint": str(path)}
+
+    tagger = train_tagger(images, labels, device, width=width, epochs=epochs, seed=seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "tagger": tagger.state_dict(),
+        "width": width,
+        "in_channels": images.shape[1],
+        "test_idx": test_idx.cpu(),
+        "eval_seed": seed,
+        "epochs": epochs,
+        "test_frac": test_frac,
+        "n": n,
+    }, path)
+    print(f"[cls] trained and SAVED frozen HR tagger -> {path}")
+    return tagger, {"source": "trained-and-saved", "checkpoint": str(path)}
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    seed_everything(args.seed)
+    eval_seed = _resolve_eval_seed(args)
+    seed_everything(eval_seed)
     env = resolve_env()
     print(f"[env] {env}")
 
@@ -474,7 +552,7 @@ def main() -> None:
     n = y.shape[0]
     # Tagger's own train/test split, drawn from the SR generator's held-out
     # "test" split — distinct from and unrelated to the generator's val/test.
-    train_idx, test_idx = _split_indices(n, args.test_frac, args.seed)
+    train_idx, test_idx = _split_indices(n, args.test_frac, eval_seed)
     y_test = y[test_idx]
     y_test_np = y_test.numpy()
     print(f"[cls] n={n} (tagger-train={len(train_idx)} tagger-test={len(test_idx)}) "
@@ -485,14 +563,18 @@ def main() -> None:
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    results: dict[str, object] = {"scale": scale, "n_train": len(train_idx), "n_test": len(test_idx)}
+    results: dict[str, object] = {
+        "scale": scale, "n_train": len(train_idx), "n_test": len(test_idx),
+        "eval_seed": eval_seed, "test_frac": args.test_frac, "max_samples": args.max_samples,
+    }
 
-    # ---- Train the fixed HR tagger, score every source ----
-    print("[cls] training fixed HR tagger...")
-    hr_tagger = train_tagger(
-        data["hr"][train_idx], y[train_idx], env.device,
-        width=args.tagger_width, epochs=args.tagger_epochs, seed=args.seed,
+    # ---- Fixed HR tagger (frozen artifact if provided), score every source ----
+    hr_tagger, tagger_provenance = _load_or_train_hr_tagger(
+        args.tagger_checkpoint, data["hr"][train_idx], y[train_idx], env.device,
+        width=args.tagger_width, epochs=args.tagger_epochs, seed=eval_seed, test_idx=test_idx,
+        test_frac=args.test_frac, n=n,
     )
+    results["tagger_provenance"] = tagger_provenance
     scores = {src: tagger_scores(hr_tagger, data[src][test_idx], env.device) for src in _SOURCES}
 
     roc: dict[str, dict] = {}
@@ -540,7 +622,7 @@ def main() -> None:
         for src in _SOURCES:
             t = train_tagger(
                 data[src][train_idx], y[train_idx], env.device,
-                width=args.tagger_width, epochs=args.tagger_epochs, seed=args.seed,
+                width=args.tagger_width, epochs=args.tagger_epochs, seed=eval_seed,
             )
             s = tagger_scores(t, data[src][test_idx], env.device)
             fpr, tpr, _thr, auc = roc_points(s, y_test_np)

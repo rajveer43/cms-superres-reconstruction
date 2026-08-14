@@ -111,7 +111,7 @@ def run_one(meta: dict, args, out_run_dir: Path) -> dict:
         "--checkpoint", meta["checkpoint"],
         "--data-dir", str(args.data_dir),
         "--out-dir", str(classif_dir),
-        "--seed", str(args.seed),
+        "--eval-seed", str(args.eval_seed),
         "--max-samples", str(args.max_samples),
         "--tagger-epochs", str(args.tagger_epochs),
         # Must match the value this checkpoint was actually trained with, else
@@ -119,6 +119,13 @@ def run_one(meta: dict, args, out_run_dir: Path) -> dict:
         # the one the run's config.yaml recorded (a real leak risk otherwise).
         "--val-ratio", str(meta["val_ratio"]),
     ]
+    if args.tagger_dir:
+        # One frozen tagger per (scale, val_ratio): the tagger-train/test split is
+        # drawn from the materialized samples, which differ across both. Sharing a
+        # single artifact across all scales would trip the split-mismatch guard in
+        # classification_eval.py.
+        tagger_ckpt = Path(args.tagger_dir) / f"hr_tagger_{meta['scale']}x_vr{meta['val_ratio']}.pt"
+        cmd += ["--tagger-checkpoint", str(tagger_ckpt)]
     t0 = time.time()
     with log_path.open("w") as lf:
         proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT)
@@ -240,7 +247,7 @@ def write_summary(rows: list[dict], out_date_dir: Path, args) -> None:
 
     md = [f"# Cross-Run Evaluation Summary — {out_date_dir.name}\n"]
     md.append(f"Evaluated {len(rows)} checkpoint(s); {len(ok)} succeeded. "
-              f"Same parquet, same downsampling, same fixed HR tagger, seed={args.seed}.\n")
+              f"Same parquet, same downsampling, same fixed HR tagger, eval_seed={args.eval_seed}.\n")
 
     md.append("## Master table (fixed HR tagger)\n")
     md.append("| Run | Scale | Cfg ep | Reached | AUC_SR | Efficiency | Recovery | Status |")
@@ -308,7 +315,11 @@ def main() -> None:
     ap.add_argument("--runs", type=str, nargs="*", default=None,
                     help="Explicit run-dir names; else auto-discover.")
     ap.add_argument("--include-smoke", action="store_true")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--eval-seed", type=int, default=0,
+                    help="Measurement seed, held fixed across every checkpoint in the batch.")
+    ap.add_argument("--tagger-dir", type=str, default=None,
+                    help="Directory of frozen per-scale HR taggers (created on first use). "
+                         "Set this to keep HR/LR AUC constant across evaluated checkpoints.")
     ap.add_argument("--max-samples", type=int, default=4000)
     ap.add_argument("--tagger-epochs", type=int, default=15)
     ap.add_argument("--skip-existing", action="store_true")
