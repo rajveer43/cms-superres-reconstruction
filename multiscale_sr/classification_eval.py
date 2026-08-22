@@ -63,6 +63,7 @@ from multiscale_sr.classification_metrics import (
 from multiscale_sr.data import get_dataloader
 from multiscale_sr.data.normalization import ChannelStats, denormalize
 from multiscale_sr.engine import collect_tagging_tensors
+from multiscale_sr.spectral import extract_particles, pairwise_omega, semd_images, spectral_function
 from multiscale_sr.models import Generator
 from multiscale_sr.tagger import tagger_scores, train_tagger
 from multiscale_sr.utils import resolve_env, seed_everything
@@ -106,6 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "is what makes HR/LR AUC constant across runs.")
     p.add_argument("--out-dir", type=str, default=None,
                    help="Default: <run>/figures/classification")
+    p.add_argument("--semd-topk", type=int, default=128,
+                   help="Brightest pixels kept per image for SEMD (paper benchmarks use N=125). "
+                        "Recorded in the results JSON; sweep it to check K-sensitivity")
+    p.add_argument("--semd-omega-R", type=float, default=1.0,
+                   help="Angular scale at which SR/HR total-energy imbalance is deposited")
+    p.add_argument("--semd-beta", type=float, default=1.0,
+                   help="SEMD ground-metric exponent: omega_ij = dist_ij ** beta")
+    p.add_argument("--semd-threshold", type=float, default=0.0,
+                   help="Raw-energy cut applied before top-K pixel selection")
+    p.add_argument("--semd-max-samples", type=int, default=1000,
+                   help="Cap on images used for SEMD (it is O(K^2 log K) per image)")
     p.add_argument("--skip-per-source", action="store_true",
                    help="Only train the fixed-HR tagger (skip per-source taggers)")
     return p
@@ -383,6 +395,114 @@ def _fig_score_agreement(scores: dict[str, np.ndarray], agreement: dict[str, dic
 # --------------------------------------------------------------------------- #
 # EXPLANATION.md
 # --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
+# SEMD (top-K pixel approximation) — the geometry-aware metric
+# --------------------------------------------------------------------------- #
+def _semd_vs_hr(images, hr_images, stats: ChannelStats, args, device) -> np.ndarray:
+    """Per-sample SEMD between one source and HR, on raw (denormalized) energies.
+
+    Every other physics quantity in this script is invariant under permutation
+    of the pixels (see ``spectral.py``); this one is not. That is the whole
+    reason it is here.
+    """
+    n = min(images.shape[0], args.semd_max_samples)
+    out = []
+    bs = 32
+    for start in range(0, n, bs):
+        sl = slice(start, min(start + bs, n))
+        pred_raw = denormalize(images[sl].float().to(device), stats)
+        tgt_raw = denormalize(hr_images[sl].float().to(device), stats)
+        out.append(
+            semd_images(
+                pred_raw, tgt_raw,
+                topk=args.semd_topk, threshold=args.semd_threshold,
+                beta=args.semd_beta, omega_R=args.semd_omega_R,
+            ).detach().cpu().numpy()
+        )
+    return np.concatenate(out) if out else np.array([])
+
+
+def _mean_spectral_curve(images, stats: ChannelStats, args, device,
+                         n_bins: int = 60, n_samples: int = 200):
+    """Batch-averaged spectral function s(omega) of Eq. 2.1, as a histogram.
+
+    This is the paper's own diagnostic visualization: the energy-weighted
+    distribution of pairwise angles. If SR reproduces HR's geometry, the curves
+    lie on top of each other; a shifted or narrowed curve is misplaced
+    substructure, which is exactly what the pixel-wise metrics cannot see.
+    """
+    n = min(images.shape[0], n_samples)
+    max_w = float(np.hypot(images.shape[-2], images.shape[-1]))
+    edges = np.linspace(0.0, max_w, n_bins + 1)
+    acc = np.zeros(n_bins)
+    seen = 0
+    for start in range(0, n, 32):
+        sl = slice(start, min(start + 32, n))
+        raw = denormalize(images[sl].float().to(device), stats)
+        e, c, _ = extract_particles(raw, topk=args.semd_topk, threshold=args.semd_threshold)
+        om = pairwise_omega(c, beta=args.semd_beta)
+        w, wt = spectral_function(e, om)
+        w_np = w.detach().cpu().numpy()
+        wt_np = wt.detach().cpu().numpy()
+        for i in range(w_np.shape[0]):
+            # Normalize per image by E_tot^2 so bright jets don't dominate.
+            norm = wt_np[i].sum()
+            h, _ = np.histogram(w_np[i], bins=edges, weights=wt_np[i] / max(norm, 1e-12))
+            acc += h
+            seen += 1
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return centers, acc / max(seen, 1)
+
+
+def _fig_spectral_overlay(curves: dict, semd: dict, path: Path) -> None:
+    """Overlay HR / LR / SR spectral functions, the paper's key diagnostic plot."""
+    plt = _plt()
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    colors = {"hr": "k", "lr": "tab:orange", "sr": "tab:blue"}
+    for src in ("hr", "lr", "sr"):
+        x, y = curves[src]
+        axes[0].plot(x, y, label=src.upper(), color=colors[src],
+                     lw=2.0 if src == "hr" else 1.6,
+                     ls="-" if src != "lr" else "--")
+    axes[0].set_xlabel(r"$\omega$  (pixel distance)")
+    axes[0].set_ylabel(r"$s(\omega)$  (normalized by $E_{tot}^2$)")
+    axes[0].set_title("Spectral function — energy-weighted pairwise angles")
+    axes[0].legend()
+    axes[0].set_yscale("log")
+
+    # Residual against HR makes small geometric shifts legible.
+    x_hr, y_hr = curves["hr"]
+    for src in ("lr", "sr"):
+        _, y = curves[src]
+        axes[1].plot(x_hr, y - y_hr, label=f"{src.upper()} - HR", color=colors[src],
+                     ls="--" if src == "lr" else "-")
+    axes[1].axhline(0.0, color="k", lw=1.0)
+    axes[1].set_xlabel(r"$\omega$  (pixel distance)")
+    axes[1].set_ylabel(r"$s(\omega) - s_{HR}(\omega)$")
+    axes[1].set_title(
+        f"Residual vs HR\nSEMD(SR,HR)={semd['sr_mean']:.4g}   "
+        f"SEMD(LR,HR)={semd['lr_mean']:.4g}",
+        fontsize=11,
+    )
+    axes[1].legend()
+
+    # Clip x to where the spectral weight actually lives; the full diagonal of
+    # the image is mostly empty and squashes the informative small-omega region.
+    x_hr, y_hr = curves["hr"]
+    support = [x[y > 1e-6].max() for x, y in curves.values() if (y > 1e-6).any()]
+    if support:
+        hi = float(max(support)) * 1.05
+        for ax in axes:
+            ax.set_xlim(0.0, hi)
+
+    fig.suptitle("SEMD (top-K pixel approximation) — arXiv:2410.05379 Eq. (2.1)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def _write_explanation(results: dict, path: Path) -> None:
     prim = results["primary_fixed_hr_tagger"]
     eff = prim["tagging_efficiency_sr_over_hr"]
@@ -660,6 +780,43 @@ def main() -> None:
     else:
         print("[cls] no pt in batch (HDF5?) — skipping pt_correlation.png")
     results["physics_correlation"] = physics
+
+    # ---- SEMD: the geometry-aware metric (see spectral.py) ----
+    print(f"[cls] computing SEMD (top-{args.semd_topk} pixel approximation)...")
+    semd_sr = _semd_vs_hr(data["sr"], data["hr"], stats, args, env.device)
+    semd_lr = _semd_vs_hr(data["lr"], data["hr"], stats, args, env.device)
+    sr_mean, lr_mean = float(np.mean(semd_sr)), float(np.mean(semd_lr))
+    semd_block: dict[str, object] = {
+        "method": "SEMD (top-K pixel approximation)",
+        "reference": "arXiv:2410.05379v3 Eq. (2.19), p=2 closed form",
+        "caveat": (
+            "Top-K truncation and a pixel-grid ground metric make this an "
+            "approximation of the paper's observable, not the observable itself."
+        ),
+        "params": {
+            "topk": args.semd_topk,
+            "omega_R": args.semd_omega_R,
+            "beta": args.semd_beta,
+            "threshold": args.semd_threshold,
+            "n_samples": int(semd_sr.size),
+        },
+        "sr_vs_hr": {"mean": sr_mean, "std": float(np.std(semd_sr))},
+        "lr_vs_hr": {"mean": lr_mean, "std": float(np.std(semd_lr))},
+        # Normalized so it is comparable across scales: 1.0 = SR matches HR
+        # geometry exactly, 0.0 = SR is no better than bicubic LR.
+        "semd_recovery": (1.0 - sr_mean / lr_mean) if lr_mean > 0 else float("nan"),
+    }
+    results["semd"] = semd_block
+    print(f"[cls] SEMD(SR,HR)={sr_mean:.5g}  SEMD(LR,HR)={lr_mean:.5g}  "
+          f"recovery={semd_block['semd_recovery']:.4f}")
+
+    try:
+        curves = {src: _mean_spectral_curve(data[src], stats, args, env.device)
+                  for src in ("hr", "lr", "sr")}
+        _fig_spectral_overlay(curves, {"sr_mean": sr_mean, "lr_mean": lr_mean},
+                              out_dir / "spectral_function.png")
+    except Exception as exc:  # figure is diagnostic; never fail the eval for it
+        print(f"[cls] spectral overlay figure skipped: {exc}")
 
     # ---- JSON + EXPLANATION (drop numpy arrays from the JSON payload) ----
     out_json = out_dir / "classification_eval.json"

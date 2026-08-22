@@ -118,6 +118,11 @@ def run_one(meta: dict, args, out_run_dir: Path) -> dict:
         # "test" here would be drawn from a different held-out file group than
         # the one the run's config.yaml recorded (a real leak risk otherwise).
         "--val-ratio", str(meta["val_ratio"]),
+        # SEMD params are recorded in each result JSON, so a batch is always
+        # self-describing about the K it used.
+        "--semd-topk", str(args.semd_topk),
+        "--semd-omega-R", str(args.semd_omega_R),
+        "--semd-max-samples", str(args.semd_max_samples),
     ]
     if args.tagger_dir:
         # One frozen tagger per (scale, val_ratio): the tagger-train/test split is
@@ -321,6 +326,12 @@ def main() -> None:
                     help="Directory of frozen per-scale HR taggers (created on first use). "
                          "Set this to keep HR/LR AUC constant across evaluated checkpoints.")
     ap.add_argument("--max-samples", type=int, default=4000)
+    ap.add_argument("--semd-topk", type=int, default=128,
+                    help="Brightest pixels kept per image for SEMD (see spectral.py)")
+    ap.add_argument("--semd-omega-R", type=float, default=1.0,
+                    help="Angular scale at which SR/HR energy imbalance is deposited")
+    ap.add_argument("--semd-max-samples", type=int, default=1000,
+                    help="Cap on images used for SEMD per checkpoint")
     ap.add_argument("--tagger-epochs", type=int, default=15)
     ap.add_argument("--skip-existing", action="store_true")
     args = ap.parse_args()
