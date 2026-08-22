@@ -109,9 +109,18 @@ def _perm_pvalue(xs: list[float], ys: list[float]) -> float:
     return count / total if total else float("nan")
 
 
-def load_seed_results(eval_dir: Path) -> list[dict]:
-    """Collect one record per ``classification_eval.json`` under ``eval_dir``."""
+def load_seed_results(eval_dir: Path, scale: int | None = None,
+                      require_semd: bool = True) -> list[dict]:
+    """Collect one record per ``classification_eval.json`` under ``eval_dir``.
+
+    ``eval_dir`` is typically a Drive folder holding *every* run ever saved, of
+    mixed scales, epoch budgets, and code vintages. Correlating across that set
+    conflates scale with seed and silently mixes runs evaluated under different
+    rulers, so filtering is on by default rather than opt-in.
+    """
     records = []
+    skipped_no_semd = 0
+    skipped_scale = 0
     for path in sorted(eval_dir.rglob("classification_eval.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -129,10 +138,23 @@ def load_seed_results(eval_dir: Path) -> list[dict]:
         if eff is None and auc.get("hr"):
             eff = auc["sr"] / auc["hr"]
         recovery = prim.get("recovery_fraction_lr_to_hr")
+        semd_block = payload.get("semd") or {}
+        if require_semd and not semd_block.get("params"):
+            skipped_no_semd += 1
+            continue
+
+        run_scale = payload.get("scale")
+        if scale is not None and run_scale != scale:
+            skipped_scale += 1
+            continue
+
+        # The run directory name: .../<run_name>/figures/classification/<file>
+        run_name = path.parent.parent.parent.name
         records.append(
             {
                 "path": str(path),
-                "run": path.parent.parent.name,
+                "run": run_name,
+                "scale": run_scale,
                 "eval_seed": payload.get("eval_seed"),
                 "auc_hr": auc["hr"],
                 "auc_lr": auc["lr"],
@@ -142,9 +164,16 @@ def load_seed_results(eval_dir: Path) -> list[dict]:
                 "metrics": {
                     label: _dig(payload, dotted) for label, dotted, _ in METRIC_SPECS
                 },
-                "semd_params": (payload.get("semd") or {}).get("params"),
+                "semd_params": semd_block.get("params"),
             }
         )
+
+    if skipped_no_semd:
+        print(f"[semd-corr] skipped {skipped_no_semd} run(s) with no SEMD block — these "
+              f"predate the SEMD code. Re-run classification_eval.py on those checkpoints "
+              f"to include them (--allow-missing-semd to audit legacy metrics instead).")
+    if skipped_scale:
+        print(f"[semd-corr] skipped {skipped_scale} run(s) not at scale {scale}x")
     return records
 
 
@@ -167,14 +196,35 @@ def build_report(records: list[dict]) -> tuple[str, dict]:
     hr_set = {round(r["auc_hr"], 12) for r in records}
     lines.append("## Provenance")
     lines.append("")
-    lines.append("| Run | eval_seed | AUC_HR | AUC_LR | AUC_SR | Tagging eff |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Run | scale | eval_seed | AUC_HR | AUC_LR | AUC_SR | Tagging eff |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in records:
         lines.append(
-            f"| `{r['run']}` | {r['eval_seed']} | {r['auc_hr']:.4f} | {r['auc_lr']:.4f} | "
-            f"{r['auc_sr']:.4f} | {r['tagging_efficiency']*100:.1f}% |"
+            f"| `{r['run']}` | {r.get('scale')}x | {r['eval_seed']} | {r['auc_hr']:.4f} | "
+            f"{r['auc_lr']:.4f} | {r['auc_sr']:.4f} | {r['tagging_efficiency']*100:.1f}% |"
         )
     lines.append("")
+
+    # --- contamination guards --------------------------------------------- #
+    # These are the two ways this table silently stops meaning anything.
+    scales = {r.get("scale") for r in records if r.get("scale") is not None}
+    if len(scales) > 1:
+        lines.append(
+            f"> **STOP: this table mixes {len(scales)} scales ({sorted(scales)}).** Tagging "
+            "difficulty depends strongly on scale, so any correlation below is partly "
+            "'which scale is this' rather than 'which seed is this'. Re-run with "
+            "`--scale <N>` before reading anything into these numbers."
+        )
+        lines.append("")
+
+    missing_seed = [r for r in records if r["eval_seed"] is None]
+    if missing_seed:
+        lines.append(
+            f"> **Warning: {len(missing_seed)} run(s) record no `eval_seed`.** These predate "
+            "the Phase A eval-seed fix, so their tagger split and init moved with the "
+            "training seed — model variance and evaluation noise are not separable in them."
+        )
+        lines.append("")
     if len(hr_set) == 1:
         lines.append(
             f"AUC_HR is identical across all {n} runs ({hr_set.pop():.4f}) — the frozen "
@@ -330,6 +380,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--eval-dir", type=str, required=True,
                     help="Directory containing per-seed classification_eval.json files")
+    ap.add_argument("--scale", type=int, default=None,
+                    help="Keep only runs at this scale. Correlating across scales conflates "
+                         "'which scale' with 'which seed' and is almost never what you want")
+    ap.add_argument("--require-semd", action="store_true", default=True,
+                    help="Drop runs with no SEMD block (i.e. produced before the SEMD code "
+                         "landed). On by default: a table with no SEMD rows cannot answer "
+                         "the question this script exists to answer")
+    ap.add_argument("--allow-missing-semd", dest="require_semd", action="store_false",
+                    help="Include pre-SEMD runs. Only for auditing the legacy metrics")
     ap.add_argument("--out", type=str, default=None, help="Markdown output path")
     ap.add_argument("--out-json", type=str, default=None, help="JSON output path")
     args = ap.parse_args()
@@ -338,7 +397,7 @@ def main() -> None:
     if not eval_dir.exists():
         raise SystemExit(f"[semd-corr] no such directory: {eval_dir}")
 
-    records = load_seed_results(eval_dir)
+    records = load_seed_results(eval_dir, scale=args.scale, require_semd=args.require_semd)
     if not records:
         raise SystemExit(f"[semd-corr] no classification_eval.json found under {eval_dir}")
     print(f"[semd-corr] loaded {len(records)} result(s)")
